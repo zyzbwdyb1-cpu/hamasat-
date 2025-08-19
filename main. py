@@ -1,0 +1,89 @@
+import os, time
+from dotenv import load_dotenv
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN", "8318407816:AAE8KALWKnJXUwenjZCgI5LN29lL9MAIArg")
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+
+# جلسات كتابة الهمسات: { user_id: {"target": target_id, "chat": chat_id, "reply_msg": msg_id} }
+sessions = {}
+# همسات محفوظة: { whisper_id: {"target":..., "text":...} }
+whispers = {}
+
+def make_whisper_id():
+    return str(int(time.time()*1000))
+
+# 1) لما تكتب "اهمس" ردًا على شخص
+@bot.message_handler(func=lambda m: m.reply_to_message and m.text.strip()=="اهمس")
+def ask_for_whisper(message):
+    sender = message.from_user
+    target = message.reply_to_message.from_user
+    chat_id = message.chat.id
+
+    sessions[sender.id] = {"target": target.id, "chat": chat_id}
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📝 اهمس هنا", url=f"https://t.me/{bot.get_me().username}?start=whisper_{sender.id}"))
+
+    bot.reply_to(message, f"📩 اضغط للكتابة إلى <b>{target.first_name}</b>:", reply_markup=kb)
+
+# 2) استقبال /start في الخاص مع session id
+@bot.message_handler(commands=["start"])
+def on_start(message):
+    args = message.text.split()
+    if len(args)>1 and args[1].startswith("whisper_"):
+        sender_id = int(args[1].split("_")[1])
+        if message.from_user.id != sender_id:
+            bot.reply_to(message, "⚠️ هذه الدعوة ليست لك.")
+            return
+
+        if sender_id in sessions:
+            target_id = sessions[sender_id]["target"]
+            bot.send_message(sender_id, f"✍️ اكتب الآن همستك إلى <b>{target_id}</b>:")
+        else:
+            bot.send_message(sender_id, "⚠️ لا توجد جلسة همسة مفتوحة.")
+
+# 3) استلام الهمسة في الخاص
+@bot.message_handler(func=lambda m: m.from_user.id in sessions and m.chat.type=="private")
+def receive_whisper(message):
+    sender_id = message.from_user.id
+    sess = sessions.pop(sender_id)
+
+    whisper_id = make_whisper_id()
+    whispers[whisper_id] = {"target": sess["target"], "text": message.text}
+
+    try: bot.delete_message(message.chat.id, message.message_id)  # حذف السرية
+    except: pass
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📩 افتح الهمسة", callback_data=f"open:{whisper_id}"))
+
+    bot.send_message(sess["chat"], f"🔒 همسة جديدة!", reply_markup=kb)
+
+# 4) فتح الهمسة من الجروب
+@bot.callback_query_handler(func=lambda c: c.data.startswith("open:"))
+def open_whisper(call: CallbackQuery):
+    wid = call.data.split(":",1)[1]
+    if wid not in whispers:
+        bot.answer_callback_query(call.id, "❌ انتهت صلاحية الهمسة.", show_alert=True)
+        return
+
+    w = whispers[wid]
+    if call.from_user.id != w["target"]:
+        bot.answer_callback_query(call.id, "🚫 هذه الهمسة ليست لك.", show_alert=True)
+        return
+
+    # ✅ إظهار النص فقط للمقصود (رسالة منبثقة له وحده)
+    bot.answer_callback_query(call.id, f"💌 {w['text']}", show_alert=True)
+
+    # بعد الفتح نحذف الهمسة من التخزين
+    whispers.pop(wid, None)
+
+def main():
+    print("🤖 Whisper bot running…")
+    bot.infinity_polling()
+
+if __name__=="__main__":
+    main()
